@@ -1,0 +1,235 @@
+services:
+  # PostgreSQL - Ana veritabanı (MLflow, Prefect, uygulama verileri)
+  postgres:
+    image: postgres:15-alpine
+    container_name: price-pred-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mlops-network
+
+  # MLflow Tracking Server
+  mlflow:
+    build:
+      context: ./infra/mlflow
+      dockerfile: Dockerfile
+    container_name: price-pred-mlflow
+    environment:
+      MLFLOW_BACKEND_STORE_URI: ${MLFLOW_BACKEND_STORE_URI}
+      MLFLOW_ARTIFACT_ROOT: ${MLFLOW_ARTIFACT_ROOT}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --backend-store-uri ${MLFLOW_BACKEND_STORE_URI}
+      --default-artifact-root ${MLFLOW_ARTIFACT_ROOT}
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - mlops-network
+
+  # Prefect Server
+  prefect-server:
+    image: prefecthq/prefect:2-python3.11
+    container_name: price-pred-prefect-server
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: ${PREFECT_API_DATABASE_CONNECTION_URL}
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_API_URL: ${PREFECT_API_URL}
+    ports:
+      - "4200:4200"
+    command: prefect server start --host 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - mlops-network
+
+  # Prefect Worker (Flow execution)
+  prefect-worker:
+    build:
+      context: .
+      dockerfile: ./airflow-or-prefect/Dockerfile
+    container_name: price-pred-prefect-worker
+    environment:
+      PREFECT_API_URL: ${PREFECT_API_URL}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      DATABASE_URL: ${DATABASE_URL}
+    volumes:
+      - ./airflow-or-prefect:/opt/prefect/flows
+      - ./training:/opt/prefect/training
+      - prefect_data:/opt/prefect/data
+      - ./data:/opt/prefect/data_store     
+    depends_on:
+      prefect-server:
+        condition: service_healthy  
+      mlflow:
+        condition: service_healthy
+    restart: unless-stopped
+    command: prefect worker start --pool default-pool --type process
+    networks:
+      - mlops-network
+
+  # Model Training Service
+  training:
+    build:
+      context: ./training
+      dockerfile: Dockerfile
+    container_name: price-pred-training
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      DATABASE_URL: ${DATABASE_URL}
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - ./training:/app
+      - training_data:/data
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - mlops-network
+
+  # Model Serving (FastAPI)
+  serving:
+    build:
+      context: ./serving
+      dockerfile: Dockerfile
+    container_name: price-pred-serving
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      DATABASE_URL: ${DATABASE_URL}
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_STAGE: ${MODEL_STAGE}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./serving:/app
+      - mlflow_artifacts:/mlflow/artifacts:ro
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - mlops-network
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: price-pred-prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - mlops-network
+
+  # Grafana - Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: price-pred-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - mlops-network
+
+  # Redis - Caching ve queue için
+  redis:
+    image: redis:7-alpine
+    container_name: price-pred-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mlops-network
+
+  # MinIO - S3-compatible object storage (MLflow artifacts için alternatif)
+  minio:
+    image: minio/minio:latest
+    container_name: price-pred-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - mlops-network
+
+networks:
+  mlops-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mlflow_artifacts:
+  prefect_data:
+  training_data:
+  prometheus_data:
+  grafana_data:
+  redis_data:
+  minio_data:
