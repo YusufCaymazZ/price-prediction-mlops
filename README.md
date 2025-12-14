@@ -88,9 +88,9 @@ After startup, access the following services:
 | **MLflow UI** | http://localhost:5000 | - |
 | **Prefect UI** | http://localhost:4200 | - |
 | **API Docs** | http://localhost:8000/docs | - |
-| **Grafana** | http://localhost:3000 | admin / admin_secure_2024 |
+| **Grafana** | http://localhost:3000 | admin / your_grafana_password |
 | **Prometheus** | http://localhost:9090 | - |
-| **MinIO** | http://localhost:9001 | minioadmin / minioadmin_secure_2024 |
+| **MinIO** | http://localhost:9001 | minioadmin / your_minio_password |
 
 ## 📦 Services
 
@@ -203,7 +203,7 @@ The pipeline supports automated retraining through Prefect flows:
 
 ### Production Checklist
 
-- [ ] Change all default passwords in `.env`
+- [x] Change all default passwords in `.env`
 - [ ] Use secrets management (e.g., Docker secrets, Vault)
 - [ ] Enable HTTPS/TLS for external endpoints
 - [ ] Implement authentication (OAuth2, JWT)
