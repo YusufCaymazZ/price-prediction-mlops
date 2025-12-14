@@ -68,29 +68,23 @@ jobs:
   # Security scanning (filesystem scan)
   ######################################################################
   security-scan:
-  runs-on: ubuntu-latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-  permissions:
-    contents: read
-    security-events: write
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.10.3
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
 
-  steps:
-    - uses: actions/checkout@v4
-
-    - name: Run Trivy filesystem scan
-      run: |
-        docker run --rm \
-          -v ${{ github.workspace }}:/project \
-          aquasec/trivy:latest \
-          fs /project \
-          --format sarif \
-          --output trivy-results.sarif
-
-    - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: trivy-results.sarif
+      - name: Upload Trivy results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
 
   ######################################################################
   # Build and push Docker images to GHCR
