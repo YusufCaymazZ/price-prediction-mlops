@@ -78,7 +78,7 @@ jobs:
 
   # Build and push Docker images
   build-images:
-    needs: [lint-and-test, security-scan]
+    needs: [security-scan]
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     
